@@ -316,5 +316,53 @@ class PipelineTests(unittest.TestCase):
             )
 
 
+    def test_validate_survives_malformed_bones(self):
+        for bad_bones in ("oops", [42], [{"name": 7}]):
+            with self.subTest(bones=bad_bones), tempfile.TemporaryDirectory() as tmp:
+                pack = _make_minimal_pack(Path(tmp))
+                main_path = pack / "models" / "main.json"
+                geo = json.loads(main_path.read_text(encoding="utf-8"))
+                geo["minecraft:geometry"][0]["bones"] = bad_bones
+                main_path.write_text(json.dumps(geo), encoding="utf-8")
+
+                errors = validate_pack(pack, quiet=True)
+                self.assertTrue(
+                    any("bones must be an array" in e or "bone entry" in e for e in errors),
+                    (bad_bones, errors),
+                )
+
+    def test_validate_survives_malformed_cube_uv_face(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = _make_minimal_pack(Path(tmp))
+            main_path = pack / "models" / "main.json"
+            geo = json.loads(main_path.read_text(encoding="utf-8"))
+            for bone in geo["minecraft:geometry"][0]["bones"]:
+                if bone.get("cubes"):
+                    bone["cubes"][0]["uv"]["north"] = 7
+                    break
+            main_path.write_text(json.dumps(geo), encoding="utf-8")
+
+            errors = validate_pack(pack, quiet=True)
+            self.assertTrue(any("north must be an object" in e for e in errors), errors)
+
+    def test_validate_rejects_malformed_arm_rotation(self):
+        for rot in ("bad", None, 5, [1, 2]):
+            with self.subTest(rotation=rot), tempfile.TemporaryDirectory() as tmp:
+                pack = _make_minimal_pack(Path(tmp))
+                arm_path = pack / "models" / "arm.json"
+                geo = json.loads(arm_path.read_text(encoding="utf-8"))
+                for bone in geo["minecraft:geometry"][0]["bones"]:
+                    if bone.get("name") == "RightArm":
+                        bone["rotation"] = rot
+                        break
+                arm_path.write_text(json.dumps(geo), encoding="utf-8")
+
+                errors = validate_pack(pack, quiet=True)
+                self.assertTrue(
+                    any("arm.json: 'RightArm' rotation must be [0,0,0]" in e for e in errors),
+                    (rot, errors),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

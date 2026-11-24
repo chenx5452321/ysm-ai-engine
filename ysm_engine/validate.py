@@ -122,6 +122,24 @@ def _load_json_no_bom(path: Path, errors: List[str]):
         return None
 
 
+def _bone_map(geo: dict) -> dict:
+    """Return the valid named bones of the first geometry, ignoring malformed entries."""
+    geos = geo.get("minecraft:geometry")
+    if not isinstance(geos, list) or not geos:
+        return {}
+    g0 = geos[0]
+    if not isinstance(g0, dict):
+        return {}
+    bones = g0.get("bones")
+    if not isinstance(bones, list):
+        return {}
+    return {
+        b["name"]: b
+        for b in bones
+        if isinstance(b, dict) and isinstance(b.get("name"), str)
+    }
+
+
 def _check_geo_uvs(geo: dict, tex_w: int, tex_h: int, label: str, errors: List[str]) -> Set[str]:
     bone_names: Set[str] = set()
     if geo.get("format_version") != "1.12.0":
@@ -131,26 +149,61 @@ def _check_geo_uvs(geo: dict, tex_w: int, tex_h: int, label: str, errors: List[s
         errors.append(f"{label}: missing minecraft:geometry array")
         return bone_names
     g0 = geos[0]
+    if not isinstance(g0, dict):
+        errors.append(f"{label}: minecraft:geometry[0] must be an object")
+        return bone_names
     desc = g0.get("description", {})
+    if not isinstance(desc, dict):
+        errors.append(f"{label}: minecraft:geometry[0].description must be an object")
+        desc = {}
     if desc.get("texture_width") != tex_w or desc.get("texture_height") != tex_h:
         errors.append(
             f"{label}: texture_width/height ({desc.get('texture_width')}x{desc.get('texture_height')}) "
             f"must match PNG ({tex_w}x{tex_h}) for YSM 2.6.0 UV unit=1"
         )
     bones = g0.get("bones", [])
-    for b in bones:
+    if not isinstance(bones, list):
+        errors.append(f"{label}: minecraft:geometry[0].bones must be an array")
+        return bone_names
+    for bi, b in enumerate(bones):
+        if not isinstance(b, dict):
+            errors.append(f"{label}: bone entry {bi} must be an object")
+            continue
         bname = b.get("name")
+        if not isinstance(bname, str) or not bname:
+            errors.append(f"{label}: bone entry {bi} must have a non-empty string name")
+            continue
         if bname in bone_names:
             errors.append(f"{label}: duplicate bone '{bname}'")
         bone_names.add(bname)
-        for ci, c in enumerate(b.get("cubes", [])):
+        cubes = b.get("cubes", [])
+        if not isinstance(cubes, list):
+            errors.append(f"{label}: bone '{bname}'.cubes must be an array")
+            continue
+        for ci, c in enumerate(cubes):
+            if not isinstance(c, dict):
+                errors.append(f"{label}: bone '{bname}' cube {ci} must be an object")
+                continue
             uv = c.get("uv")
             if not isinstance(uv, dict):
                 errors.append(f"{label}: bone '{bname}' cube {ci} does not use per-face UV dict")
                 continue
             for fname, fuv in uv.items():
-                u, v = fuv.get("uv", [None, None])
-                uw, vh = fuv.get("uv_size", [None, None])
+                if not isinstance(fuv, dict):
+                    errors.append(f"{label}: {bname}[{ci}].{fname} must be an object")
+                    continue
+                uv_pair = fuv.get("uv", [None, None])
+                if not isinstance(uv_pair, (list, tuple)) or len(uv_pair) != 2:
+                    errors.append(f"{label}: {bname}[{ci}].{fname}.uv must be a 2-element array")
+                    u = v = None
+                else:
+                    u, v = uv_pair
+                size_pair = fuv.get("uv_size", [None, None])
+                if not isinstance(size_pair, (list, tuple)) or len(size_pair) != 2:
+                    errors.append(f"{label}: {bname}[{ci}].{fname}.uv_size must be a 2-element array")
+                    uw = vh = None
+                else:
+                    uw, vh = size_pair
                 for val, tag in ((u, "u"), (v, "v"), (uw, "uv_size[0]"), (vh, "uv_size[1]")):
                     if not isinstance(val, int) or isinstance(val, bool):
                         errors.append(f"{label}: {bname}[{ci}].{fname}.{tag}={val!r} must be exact int")
@@ -270,7 +323,7 @@ def validate_pack(pack_dir: Path, quiet: bool = False) -> List[str]:
         main_geo = _load_json_no_bom(pack_dir / main_rel, errors)
         if main_geo:
             main_bones = _check_geo_uvs(main_geo, tex_w, tex_h, main_rel, errors)
-            main_bones_map = {b["name"]: b for b in main_geo["minecraft:geometry"][0]["bones"]}
+            main_bones_map = _bone_map(main_geo)
 
             for req in REQUIRED_BONES:
                 if req not in main_bones:
@@ -305,7 +358,7 @@ def validate_pack(pack_dir: Path, quiet: bool = False) -> List[str]:
         arm_geo = _load_json_no_bom(pack_dir / arm_rel, errors)
         if arm_geo:
             arm_bones = _check_geo_uvs(arm_geo, tex_w, tex_h, arm_rel, errors)
-            arm_map = {b["name"]: b for b in arm_geo["minecraft:geometry"][0]["bones"]}
+            arm_map = _bone_map(arm_geo)
             for side in ("LeftArm", "RightArm"):
                 if side not in arm_bones:
                     errors.append(f"arm.json: missing root bone '{side}'")
@@ -313,7 +366,13 @@ def validate_pack(pack_dir: Path, quiet: bool = False) -> List[str]:
                     if "parent" in arm_map[side]:
                         errors.append(f"arm.json: '{side}' must be a root bone (no parent)")
                     rot = arm_map[side].get("rotation", [0, 0, 0])
-                    if any(abs(float(r)) > 1e-4 for r in rot):
+                    if (
+                        not isinstance(rot, (list, tuple))
+                        or len(rot) != 3
+                        or any(not isinstance(r, (int, float)) or isinstance(r, bool) for r in rot)
+                    ):
+                        errors.append(f"arm.json: '{side}' rotation must be [0,0,0], got {rot!r}")
+                    elif any(abs(float(r)) > 1e-4 for r in rot):
                         errors.append(f"arm.json: '{side}' rotation must be [0,0,0], got {rot}")
 
     if not isinstance(anim_cfg, dict):
